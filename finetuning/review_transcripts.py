@@ -24,7 +24,30 @@ import subprocess
 import sys
 from pathlib import Path
 
-HELP = "Commands: [enter]=keep  text=edit  r=replay  d=drop  b=back  q=save+quit  ?=help"
+try:
+    import readline  # noqa: F401  (enables line-edit pre-fill on macOS)
+    _HAS_READLINE = True
+except ImportError:
+    _HAS_READLINE = False
+
+HELP = "Commands: [enter]=keep  e=edit (prefilled)  r=replay  d=drop  b=back  q=save+quit  ?=help"
+
+
+def edit_with_prefill(prompt: str, text: str) -> str:
+    """Open a prompt pre-populated with `text` so the user can arrow-key edit."""
+    if not _HAS_READLINE:
+        print(f"  current: {text}")
+        return input(prompt)
+
+    def hook():
+        readline.insert_text(text)
+        readline.redisplay()
+
+    readline.set_startup_hook(hook)
+    try:
+        return input(prompt)
+    finally:
+        readline.set_startup_hook(None)
 
 
 def play(clip_path: Path):
@@ -155,7 +178,19 @@ def main():
         elif ans == "?":
             print(HELP)
             continue
+        elif ans == "e":
+            new_text = edit_with_prefill("  edit> ", r["text"]).strip()
+            if not new_text:
+                print("  (empty input -> kept original)")
+                r["status"] = "kept"
+            elif new_text == r["text"]:
+                r["status"] = "kept"
+            else:
+                r["text"] = new_text
+                r["status"] = "edited"
+            i += 1
         else:
+            # Treat anything else as a direct text replacement (back-compat)
             r["text"] = ans
             r["status"] = "edited"
             i += 1
