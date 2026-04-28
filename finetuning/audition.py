@@ -42,6 +42,10 @@ def main():
                     choices=["flash_attention_2", "sdpa", "eager"])
     ap.add_argument("--sentences_file", default=None,
                     help="Optional file with one sentence per line; overrides defaults.")
+    ap.add_argument("--max_new_tokens", type=int, default=600,
+                    help="Hard cap on generated codec frames per utterance "
+                         "(at 12 Hz, 600 ~ 50 s). Prevents runaway generation "
+                         "when SFT degraded EOS prediction.")
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir).expanduser()
@@ -66,15 +70,16 @@ def main():
         sys.exit(f"[error] speaker '{args.speaker}' not in supported list: {speakers}")
 
     for i, text in enumerate(sentences, start=1):
-        print(f"[s{i:02d}] {text}")
+        print(f"[s{i:02d}] {text}", flush=True)
         wavs, sr = model.generate_custom_voice(
             text=text,
             language=args.language,
             speaker=args.speaker,
+            max_new_tokens=args.max_new_tokens,
         )
         out_path = out_dir / f"s{i:02d}.wav"
         sf.write(str(out_path), wavs[0], sr)
-        print(f"       -> {out_path}")
+        print(f"       -> {out_path}  ({len(wavs[0])/sr:.2f}s)", flush=True)
 
     print(f"[done] {len(sentences)} files -> {out_dir}")
 
