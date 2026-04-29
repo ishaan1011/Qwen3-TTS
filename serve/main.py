@@ -111,13 +111,37 @@ async def handle_user_message(
             await queue.put(None)  # sentinel
 
     async def consumer() -> None:
+        """
+        Pulls sentences from the queue and synthesizes them. Whenever
+        multiple sentences are queued at the time we wake up, they are
+        merged into a single generate() call to amortize the fixed
+        per-call overhead and give the model more prosodic context.
+        """
         while True:
-            sentence = await queue.get()
-            if sentence is None:
+            first = await queue.get()
+            if first is None:
                 return
+            batch = [first]
+            # Drain whatever else is queued without blocking. If we hit
+            # the sentinel, re-queue it so the next iteration sees it.
+            while True:
+                try:
+                    more = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if more is None:
+                    queue.put_nowait(None)
+                    break
+                batch.append(more)
+            text = " ".join(batch)
             t0 = asyncio.get_event_loop().time()
-            await synthesize_and_send(ws, app.state.tts, sentence)
-            log.info("synth+send %.0fms for: %s", (asyncio.get_event_loop().time() - t0) * 1000, sentence[:60])
+            await synthesize_and_send(ws, app.state.tts, text)
+            log.info(
+                "synth+send %.0fms (n=%d) for: %s",
+                (asyncio.get_event_loop().time() - t0) * 1000,
+                len(batch),
+                text[:80],
+            )
 
     await asyncio.gather(producer(), consumer())
 

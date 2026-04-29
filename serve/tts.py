@@ -29,7 +29,7 @@ class TTSEngine:
         speaker: str,
         device: str = "cuda:0",
         attn_impl: str = "flash_attention_2",
-        max_new_tokens: int = 600,
+        max_new_tokens: int = 250,
     ):
         self.checkpoint_dir = checkpoint_dir
         self.speaker = speaker
