@@ -60,40 +60,33 @@ class TTSEngine:
         # overhead is the highest-leverage compile target. Set
         # TTS_COMPILE=0 to skip if it causes problems.
         if os.environ.get("TTS_COMPILE", "1") != "0":
-            try:
-                torch._dynamo.config.suppress_errors = True
-                # Qwen3TTSModel is a wrapper; the underlying nn.Module is
-                # at .model, and the talker LM is at .model.talker.
-                inner = getattr(self.model, "model", None)
-                talker = getattr(inner, "talker", None) if inner is not None else None
-                compile_targets = []
-                if talker is not None:
-                    inner.talker = torch.compile(
-                        talker,
+            inner = getattr(self.model, "model", None)
+            log.info(
+                "compile setup: inner=%s; inner attrs containing 'talk' or 'token' or 'predict': %s",
+                type(inner).__name__ if inner is not None else None,
+                [a for a in dir(inner) if any(k in a.lower() for k in ("talk", "token", "predict", "decoder"))]
+                    if inner is not None else None,
+            )
+            for attr_name in ("talker", "speech_tokenizer"):
+                target = getattr(inner, attr_name, None) if inner is not None else None
+                if target is None:
+                    log.warning("compile: %s not found, skipping", attr_name)
+                    continue
+                try:
+                    compiled = torch.compile(
+                        target,
                         mode="reduce-overhead",
                         dynamic=True,
                         fullgraph=False,
                     )
-                    compile_targets.append("talker")
-                # Also compile the speech_tokenizer decoder if present.
-                # It's used at the end of each synth and is small but
-                # has a fixed shape per call so it should compile easily.
-                spk_tok = getattr(inner, "speech_tokenizer", None) if inner is not None else None
-                if spk_tok is not None:
-                    inner.speech_tokenizer = torch.compile(
-                        spk_tok,
-                        mode="reduce-overhead",
-                        dynamic=True,
-                        fullgraph=False,
+                    setattr(inner, attr_name, compiled)
+                    log.info("compile: %s wrapped (%s)", attr_name, type(target).__name__)
+                except Exception as e:
+                    import traceback
+                    log.warning(
+                        "compile: %s FAILED with %s: %r\n%s",
+                        attr_name, type(e).__name__, e, traceback.format_exc(),
                     )
-                    compile_targets.append("speech_tokenizer")
-                if compile_targets:
-                    log.info("torch.compile applied to: %s", ", ".join(compile_targets))
-                else:
-                    available = [a for a in dir(inner) if not a.startswith("_")][:30] if inner is not None else None
-                    log.warning("no compile targets found. inner=%s, attrs=%s", type(inner).__name__, available)
-            except Exception as e:
-                log.warning("torch.compile setup failed (%s); continuing uncompiled", e)
 
     def _estimate_max_new_tokens(self, text: str) -> int:
         """
