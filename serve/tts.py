@@ -61,18 +61,37 @@ class TTSEngine:
         # TTS_COMPILE=0 to skip if it causes problems.
         if os.environ.get("TTS_COMPILE", "1") != "0":
             try:
-                # Use cudagraphs for tighter latency on small batch
                 torch._dynamo.config.suppress_errors = True
-                if hasattr(self.model, "talker"):
-                    self.model.talker = torch.compile(
-                        self.model.talker,
+                # Qwen3TTSModel is a wrapper; the underlying nn.Module is
+                # at .model, and the talker LM is at .model.talker.
+                inner = getattr(self.model, "model", None)
+                talker = getattr(inner, "talker", None) if inner is not None else None
+                compile_targets = []
+                if talker is not None:
+                    inner.talker = torch.compile(
+                        talker,
                         mode="reduce-overhead",
                         dynamic=True,
                         fullgraph=False,
                     )
-                    log.info("torch.compile applied to talker (mode=reduce-overhead, dynamic=True)")
+                    compile_targets.append("talker")
+                # Also compile the speech_tokenizer decoder if present.
+                # It's used at the end of each synth and is small but
+                # has a fixed shape per call so it should compile easily.
+                spk_tok = getattr(inner, "speech_tokenizer", None) if inner is not None else None
+                if spk_tok is not None:
+                    inner.speech_tokenizer = torch.compile(
+                        spk_tok,
+                        mode="reduce-overhead",
+                        dynamic=True,
+                        fullgraph=False,
+                    )
+                    compile_targets.append("speech_tokenizer")
+                if compile_targets:
+                    log.info("torch.compile applied to: %s", ", ".join(compile_targets))
                 else:
-                    log.warning("model has no .talker attribute — skipping compile")
+                    available = [a for a in dir(inner) if not a.startswith("_")][:30] if inner is not None else None
+                    log.warning("no compile targets found. inner=%s, attrs=%s", type(inner).__name__, available)
             except Exception as e:
                 log.warning("torch.compile setup failed (%s); continuing uncompiled", e)
 
