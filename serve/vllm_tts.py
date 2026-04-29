@@ -115,12 +115,14 @@ class VLLMTTSEngine:
         }
         t0 = time.time()
         # vllm-omni emits incremental audio chunks across multiple
-        # stage_output events (small warmup chunks first, then larger
-        # steady-state chunks, then a final tail chunk). Each event's
-        # mm["audio"] is the NEW chunk only, not the cumulative state.
-        # Concatenate everything in arrival order.
-        all_chunks: list[torch.Tensor] = []
-        last_sr: int = SAMPLE_RATE
+        # stage_output events. Forward each chunk to the caller as
+        # PCM bytes as soon as it arrives — the WebSocket consumer
+        # streams them to the browser, where Web Audio schedules
+        # them gap-free. This brings TTFA down from "wait for full
+        # sentence synth" (~1.5-2.5s) to "first chunk" (~200-500ms).
+        chunk_count = 0
+        total_samples = 0
+        ttfa_ms = -1.0
         async for stage_output in self.omni.generate(request, request_id=request_id):
             mm = stage_output.request_output.outputs[0].multimodal_output
             if mm is None:
@@ -128,33 +130,34 @@ class VLLMTTSEngine:
             audio = mm.get("audio")
             if audio is None:
                 continue
-            if isinstance(audio, list):
-                for t in audio:
-                    if hasattr(t, "shape"):
-                        all_chunks.append(t)
-            elif hasattr(audio, "shape"):
-                all_chunks.append(audio)
-            sr_raw = mm.get("sr", SAMPLE_RATE)
-            sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
-            last_sr = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
 
-        if not all_chunks:
+            chunks_this_event: list[torch.Tensor] = []
+            if isinstance(audio, list):
+                chunks_this_event.extend(t for t in audio if hasattr(t, "shape"))
+            elif hasattr(audio, "shape"):
+                chunks_this_event.append(audio)
+
+            for chunk in chunks_this_event:
+                if chunk_count == 0:
+                    ttfa_ms = (time.time() - t0) * 1000
+                wav = chunk.float().cpu().numpy().flatten()
+                wav = np.clip(wav, -1.0, 1.0)
+                pcm = (wav * 32767.0).astype(np.int16, copy=False)
+                chunk_count += 1
+                total_samples += int(chunk.shape[-1])
+                yield pcm.tobytes()
+
+        if chunk_count == 0:
             log.warning("synth produced no audio for: %s", text[:60])
             return
 
-        audio_tensor = torch.cat(all_chunks, dim=-1)
-        wav = audio_tensor.float().cpu().numpy().flatten()
-        if last_sr != SAMPLE_RATE:
-            log.warning("unexpected sr %d != %d (no resample)", last_sr, SAMPLE_RATE)
-        wav = np.clip(wav, -1.0, 1.0)
-        pcm = (wav * 32767.0).astype(np.int16, copy=False)
-
         wall_ms = (time.time() - t0) * 1000
-        audio_s = len(wav) / SAMPLE_RATE
+        audio_s = total_samples / SAMPLE_RATE
         rtf = wall_ms / (audio_s * 1000) if audio_s > 0 else float("inf")
-        log.info("synth audio=%.2fs wall=%.0fms RTF=%.2fx | %s",
-                 audio_s, wall_ms, rtf, text[:60])
-        yield pcm.tobytes()
+        log.info(
+            "synth chunks=%d audio=%.2fs ttfa=%.0fms wall=%.0fms RTF=%.2fx | %s",
+            chunk_count, audio_s, ttfa_ms, wall_ms, rtf, text[:60],
+        )
 
 
 def make_engine_from_env() -> VLLMTTSEngine:
