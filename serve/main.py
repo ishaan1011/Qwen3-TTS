@@ -81,26 +81,47 @@ async def handle_user_message(
     content: str,
     history: list[dict[str, Any]],
 ) -> None:
+    """
+    Runs the LLM stream and the TTS pipeline as two concurrent asyncio tasks
+    coordinated by a sentence queue. Crucially, synthesis does NOT block
+    pulling more tokens from OpenAI, so by the time sentence N's audio is
+    playing in the browser, the consumer has already started synthesizing
+    sentence N+1.
+    """
     history.append({"role": "user", "content": content})
-    text_buffer = ""
-    full_response = ""
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    full_response_parts: list[str] = []
 
     await ws.send_text(json.dumps({"type": "audio_start", "sample_rate": SAMPLE_RATE}))
 
-    async for delta in stream_chat(app.state.openai, history):
-        await ws.send_text(json.dumps({"type": "llm_token", "delta": delta}))
-        full_response += delta
-        text_buffer += delta
+    async def producer() -> None:
+        text_buffer = ""
+        try:
+            async for delta in stream_chat(app.state.openai, history):
+                await ws.send_text(json.dumps({"type": "llm_token", "delta": delta}))
+                full_response_parts.append(delta)
+                text_buffer += delta
+                sentences, text_buffer = drain_sentences(text_buffer)
+                for sentence in sentences:
+                    await queue.put(sentence)
+            tail = text_buffer.strip()
+            if tail:
+                await queue.put(tail)
+        finally:
+            await queue.put(None)  # sentinel
 
-        sentences, text_buffer = drain_sentences(text_buffer)
-        for sentence in sentences:
+    async def consumer() -> None:
+        while True:
+            sentence = await queue.get()
+            if sentence is None:
+                return
+            t0 = asyncio.get_event_loop().time()
             await synthesize_and_send(ws, app.state.tts, sentence)
+            log.info("synth+send %.0fms for: %s", (asyncio.get_event_loop().time() - t0) * 1000, sentence[:60])
 
-    # flush any tail text the LLM produced without a final '.'
-    if text_buffer.strip():
-        await synthesize_and_send(ws, app.state.tts, text_buffer)
+    await asyncio.gather(producer(), consumer())
 
-    history.append({"role": "assistant", "content": full_response})
+    history.append({"role": "assistant", "content": "".join(full_response_parts)})
     await ws.send_text(json.dumps({"type": "audio_end"}))
 
 
