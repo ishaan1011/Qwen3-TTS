@@ -114,28 +114,57 @@ class VLLMTTSEngine:
             "additional_information": self._build_additional_information(text),
         }
         t0 = time.time()
-        last_audio: list | torch.Tensor | None = None
+        # vllm-omni emits multiple stage_outputs per request (one per
+        # stage/chunk). The audio data structure varies across events:
+        # some have empty/partial audio, the "winning" event has the
+        # complete cumulative audio. Strategy: track the event whose
+        # mm["audio"] contains the most total samples and use that.
+        best_audio: list | torch.Tensor | None = None
+        best_samples: int = 0
         last_sr: int = SAMPLE_RATE
+        debug_log: list[str] = []
         async for stage_output in self.omni.generate(request, request_id=request_id):
             mm = stage_output.request_output.outputs[0].multimodal_output
             if mm is None:
+                debug_log.append(f"finished={stage_output.finished} mm=None")
                 continue
             audio = mm.get("audio")
             if audio is None:
+                debug_log.append(f"finished={stage_output.finished} audio=None")
                 continue
-            last_audio = audio
-            sr_raw = mm.get("sr", SAMPLE_RATE)
-            sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
-            last_sr = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
 
-        if last_audio is None:
+            if isinstance(audio, list):
+                samples = sum(int(t.shape[-1]) for t in audio if hasattr(t, "shape"))
+                debug_log.append(
+                    f"finished={stage_output.finished} list(n={len(audio)},samples={samples})"
+                )
+            elif hasattr(audio, "shape"):
+                samples = int(audio.shape[-1])
+                debug_log.append(
+                    f"finished={stage_output.finished} tensor(shape={tuple(audio.shape)})"
+                )
+            else:
+                debug_log.append(f"finished={stage_output.finished} type={type(audio).__name__}")
+                continue
+
+            if samples > best_samples:
+                best_samples = samples
+                best_audio = audio
+                sr_raw = mm.get("sr", SAMPLE_RATE)
+                sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
+                last_sr = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
+
+        # Print the per-event picture so we can see what vllm-omni is doing.
+        log.info("synth events for %r:\n  %s", text[:50], "\n  ".join(debug_log))
+
+        if best_audio is None or best_samples == 0:
             log.warning("synth produced no audio for: %s", text[:60])
             return
 
-        if isinstance(last_audio, list):
-            audio_tensor = torch.cat(last_audio, dim=-1)
+        if isinstance(best_audio, list):
+            audio_tensor = torch.cat(best_audio, dim=-1)
         else:
-            audio_tensor = last_audio
+            audio_tensor = best_audio
         wav = audio_tensor.float().cpu().numpy().flatten()
         if last_sr != SAMPLE_RATE:
             log.warning("unexpected sr %d != %d (no resample)", last_sr, SAMPLE_RATE)
