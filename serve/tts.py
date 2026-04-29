@@ -29,12 +29,27 @@ class TTSEngine:
         speaker: str,
         device: str = "cuda:0",
         attn_impl: str = "flash_attention_2",
-        max_new_tokens: int = 250,
+        max_new_tokens_cap: int = 150,
+        frames_per_word: int = 8,
+        frames_buffer: int = 30,
     ):
         self.checkpoint_dir = checkpoint_dir
         self.speaker = speaker
         self.device = device
-        self.max_new_tokens = max_new_tokens
+        self.max_new_tokens_cap = max_new_tokens_cap
+        self.frames_per_word = frames_per_word
+        self.frames_buffer = frames_buffer
+
+    def _estimate_max_new_tokens(self, text: str) -> int:
+        """
+        Adaptive cap. The fine-tuned checkpoint sometimes fails to emit EOS
+        on out-of-distribution inputs, so generation runs to whatever cap we
+        set. Sizing the cap to the actual text length keeps wall-clock synth
+        time bounded.
+        """
+        words = max(1, len(text.split()))
+        estimated = words * self.frames_per_word + self.frames_buffer
+        return min(estimated, self.max_new_tokens_cap)
 
         log.info("loading TTS checkpoint %s", checkpoint_dir)
         t0 = time.time()
@@ -65,11 +80,12 @@ class TTSEngine:
         text = text.strip()
         if not text:
             return b""
+        max_new_tokens = self._estimate_max_new_tokens(text)
         with torch.no_grad():
             wavs, sr = self.model.generate_custom_voice(
                 text=text,
                 speaker=self.speaker,
-                max_new_tokens=self.max_new_tokens,
+                max_new_tokens=max_new_tokens,
             )
         if sr != SAMPLE_RATE:
             raise RuntimeError(f"unexpected sample rate {sr}, expected {SAMPLE_RATE}")

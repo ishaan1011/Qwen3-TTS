@@ -55,6 +55,10 @@ function appendPhraseTag(el, text) {
 // Convert Int16 PCM -> Float32, schedule via Web Audio for gapless playback.
 function playPcm(arrayBuffer) {
   const ctx = ensureAudioContext();
+  // Browsers can auto-suspend AudioContext after long silence; resume
+  // defensively before scheduling each chunk so we don't lose audio after
+  // a long synth wait.
+  if (ctx.state === "suspended") ctx.resume();
   const pcm = new Int16Array(arrayBuffer);
   if (pcm.length === 0) return;
   const buf = ctx.createBuffer(1, pcm.length, SAMPLE_RATE);
@@ -63,10 +67,14 @@ function playPcm(arrayBuffer) {
   const src = ctx.createBufferSource();
   src.buffer = buf;
   src.connect(ctx.destination);
-  const start = Math.max(ctx.currentTime + 0.02, nextStartTime); // tiny lead to avoid underrun
+  const start = Math.max(ctx.currentTime + 0.02, nextStartTime);
   src.start(start);
   nextStartTime = start + buf.duration;
+  if (window._dbg) console.log("playPcm", pcm.length, "samples", "ctx.state", ctx.state, "start", start.toFixed(2), "next", nextStartTime.toFixed(2));
 }
+
+// Set window._dbg = true in the browser console to see playPcm logs.
+window._dbg = false;
 
 function connect() {
   const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
