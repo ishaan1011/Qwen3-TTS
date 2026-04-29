@@ -55,6 +55,27 @@ class TTSEngine:
                 f"speaker '{speaker}' not in checkpoint's supported list: {speakers}"
             )
 
+        # Try to torch.compile the talker LM. This is the largest module
+        # in the per-token forward path; reducing its kernel launch
+        # overhead is the highest-leverage compile target. Set
+        # TTS_COMPILE=0 to skip if it causes problems.
+        if os.environ.get("TTS_COMPILE", "1") != "0":
+            try:
+                # Use cudagraphs for tighter latency on small batch
+                torch._dynamo.config.suppress_errors = True
+                if hasattr(self.model, "talker"):
+                    self.model.talker = torch.compile(
+                        self.model.talker,
+                        mode="reduce-overhead",
+                        dynamic=True,
+                        fullgraph=False,
+                    )
+                    log.info("torch.compile applied to talker (mode=reduce-overhead, dynamic=True)")
+                else:
+                    log.warning("model has no .talker attribute — skipping compile")
+            except Exception as e:
+                log.warning("torch.compile setup failed (%s); continuing uncompiled", e)
+
     def _estimate_max_new_tokens(self, text: str) -> int:
         """
         Adaptive cap. The fine-tuned checkpoint sometimes fails to emit EOS
@@ -67,9 +88,14 @@ class TTSEngine:
         return min(estimated, self.max_new_tokens_cap)
 
     def warmup(self) -> None:
-        log.info("warming up CUDA kernels")
+        """Warm CUDA kernels and trigger torch.compile graph capture for
+        a few representative shapes, so first real request isn't slow."""
+        log.info("warming up CUDA kernels (compile + graph capture may take 30s+)")
         t0 = time.time()
+        # Two passes at different lengths to capture more graphs under
+        # dynamic=True. First pass tends to be slowest due to compile.
         self.synthesize("Warming up.")
+        self.synthesize("This is a slightly longer warmup sentence to capture another graph shape.")
         log.info("warmup done in %.1fs", time.time() - t0)
 
     def synthesize(self, text: str) -> bytes:
