@@ -55,37 +55,55 @@ class TTSEngine:
                 f"speaker '{speaker}' not in checkpoint's supported list: {speakers}"
             )
 
-        # Try to torch.compile the talker LM. This is the largest module
-        # in the per-token forward path; reducing its kernel launch
-        # overhead is the highest-leverage compile target. Set
-        # TTS_COMPILE=0 to skip if it causes problems.
+        # Try to torch.compile the per-token forward modules. The hot path
+        # per codec frame is talker.code_predictor (called 15x per frame
+        # for sub-codebook prediction) — that's the ~150ms/frame floor.
+        # The outer talker forward is called only once per frame.
+        # Compile both, code_predictor first so the wrap survives the
+        # outer talker compile.
         if os.environ.get("TTS_COMPILE", "1") != "0":
             inner = getattr(self.model, "model", None)
+            talker = getattr(inner, "talker", None) if inner is not None else None
             log.info(
-                "compile setup: inner=%s; inner attrs containing 'talk' or 'token' or 'predict': %s",
+                "compile setup: inner=%s talker=%s",
                 type(inner).__name__ if inner is not None else None,
-                [a for a in dir(inner) if any(k in a.lower() for k in ("talk", "token", "predict", "decoder"))]
-                    if inner is not None else None,
+                type(talker).__name__ if talker is not None else None,
             )
-            for attr_name in ("talker", "speech_tokenizer"):
-                target = getattr(inner, attr_name, None) if inner is not None else None
-                if target is None:
-                    log.warning("compile: %s not found, skipping", attr_name)
-                    continue
+
+            # 1) code_predictor — the hot inner loop (15 forwards per frame)
+            if talker is not None:
+                cp = getattr(talker, "code_predictor", None)
+                if cp is not None:
+                    try:
+                        talker.code_predictor = torch.compile(
+                            cp,
+                            mode="reduce-overhead",
+                            dynamic=True,
+                            fullgraph=False,
+                        )
+                        log.info("compile: code_predictor wrapped (%s)", type(cp).__name__)
+                    except Exception as e:
+                        import traceback
+                        log.warning(
+                            "compile: code_predictor FAILED with %s: %r\n%s",
+                            type(e).__name__, e, traceback.format_exc(),
+                        )
+
+            # 2) talker — the outer forward (1 per frame)
+            if talker is not None:
                 try:
-                    compiled = torch.compile(
-                        target,
+                    inner.talker = torch.compile(
+                        talker,
                         mode="reduce-overhead",
                         dynamic=True,
                         fullgraph=False,
                     )
-                    setattr(inner, attr_name, compiled)
-                    log.info("compile: %s wrapped (%s)", attr_name, type(target).__name__)
+                    log.info("compile: talker wrapped (%s)", type(talker).__name__)
                 except Exception as e:
                     import traceback
                     log.warning(
-                        "compile: %s FAILED with %s: %r\n%s",
-                        attr_name, type(e).__name__, e, traceback.format_exc(),
+                        "compile: talker FAILED with %s: %r\n%s",
+                        type(e).__name__, e, traceback.format_exc(),
                     )
 
     def _estimate_max_new_tokens(self, text: str) -> int:
