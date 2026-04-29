@@ -98,3 +98,65 @@ def drain_sentences(text: str) -> tuple[list[str], str]:
             return out, rest
         if sent:
             out.append(sent)
+
+
+# ---------------------------------------------------------------------------
+# Schedule-based forced emission
+#
+# When a hard sentence boundary doesn't arrive in time, force-emit at a soft
+# boundary (clause or word) once the buffer crosses the next scheduled
+# character threshold. Lifted from ElevenLabs' chunk_length_schedule pattern.
+# ---------------------------------------------------------------------------
+
+# Cumulative buffer size at which to force-emit chunk N (1-indexed).
+# Defaults to the same balanced schedule ElevenLabs publishes.
+DEFAULT_FORCE_SCHEDULE: list[int] = [150, 200, 260]
+DEFAULT_FORCE_STEADY: int = 290
+
+_CLAUSE_PUNCT = ",;:—"
+
+
+def force_emit_threshold(
+    chunks_emitted: int,
+    schedule: list[int] = DEFAULT_FORCE_SCHEDULE,
+    steady: int = DEFAULT_FORCE_STEADY,
+) -> int:
+    """Return the buffer size at which the next chunk should be force-emitted
+    (assuming no sentence boundary fires first)."""
+    if chunks_emitted < len(schedule):
+        return schedule[chunks_emitted]
+    return steady
+
+
+def find_soft_cut(text: str, target_len: int, search_window: int = 60) -> int | None:
+    """
+    Find an exclusive end position to slice the buffer at, preferring (in order):
+      1. a clause-ending punctuation followed by whitespace (`, `, `; `, etc.)
+      2. any whitespace (= word boundary)
+    Searches backwards from `target_len` within `search_window` characters.
+    Returns None if `len(text) <= target_len` (not yet over threshold) or no
+    acceptable cut exists in the window (don't cut mid-word).
+    """
+    n = len(text)
+    if n <= target_len:
+        return None
+    window_start = max(0, target_len - search_window)
+    upper = min(target_len, n - 1)
+
+    # 1. clause boundary (followed by whitespace or EOF)
+    for i in range(upper, window_start - 1, -1):
+        if text[i] in _CLAUSE_PUNCT and (i + 1 >= n or text[i + 1].isspace()):
+            j = i + 1
+            while j < n and text[j].isspace():
+                j += 1
+            return j
+
+    # 2. word boundary
+    for i in range(upper, window_start - 1, -1):
+        if text[i].isspace():
+            j = i + 1
+            while j < n and text[j].isspace():
+                j += 1
+            return j
+
+    return None

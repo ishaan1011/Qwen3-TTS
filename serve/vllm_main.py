@@ -32,7 +32,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .llm import DEFAULT_SYSTEM, make_client, stream_chat
-from .phrases import drain_sentences
+from .phrases import drain_sentences, find_soft_cut, force_emit_threshold
 from .vllm_tts import SAMPLE_RATE, make_engine_from_env
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
@@ -94,14 +94,36 @@ async def handle_user_message(
 
     async def producer() -> None:
         text_buffer = ""
+        chunks_emitted = 0
         try:
             async for delta in stream_chat(app.state.openai, history):
                 await ws.send_text(json.dumps({"type": "llm_token", "delta": delta}))
                 full_response_parts.append(delta)
                 text_buffer += delta
+
+                # 1. Drain any complete sentences (best prosody).
                 sentences, text_buffer = drain_sentences(text_buffer)
                 for sentence in sentences:
                     await queue.put(sentence)
+                    chunks_emitted += 1
+
+                # 2. If we still have a long unfinished buffer, force-emit at
+                #    a clause/word boundary once we cross the schedule
+                #    threshold (ElevenLabs-style 150 / 200 / 260 / 290).
+                while True:
+                    threshold = force_emit_threshold(chunks_emitted)
+                    if len(text_buffer) < threshold:
+                        break
+                    cut = find_soft_cut(text_buffer, threshold)
+                    if cut is None:
+                        break
+                    chunk = text_buffer[:cut].strip()
+                    text_buffer = text_buffer[cut:]
+                    if not chunk:
+                        break
+                    await queue.put(chunk)
+                    chunks_emitted += 1
+
             tail = text_buffer.strip()
             if tail:
                 await queue.put(tail)
