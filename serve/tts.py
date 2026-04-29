@@ -40,17 +40,6 @@ class TTSEngine:
         self.frames_per_word = frames_per_word
         self.frames_buffer = frames_buffer
 
-    def _estimate_max_new_tokens(self, text: str) -> int:
-        """
-        Adaptive cap. The fine-tuned checkpoint sometimes fails to emit EOS
-        on out-of-distribution inputs, so generation runs to whatever cap we
-        set. Sizing the cap to the actual text length keeps wall-clock synth
-        time bounded.
-        """
-        words = max(1, len(text.split()))
-        estimated = words * self.frames_per_word + self.frames_buffer
-        return min(estimated, self.max_new_tokens_cap)
-
         log.info("loading TTS checkpoint %s", checkpoint_dir)
         t0 = time.time()
         self.model = Qwen3TTSModel.from_pretrained(
@@ -65,6 +54,17 @@ class TTSEngine:
             raise RuntimeError(
                 f"speaker '{speaker}' not in checkpoint's supported list: {speakers}"
             )
+
+    def _estimate_max_new_tokens(self, text: str) -> int:
+        """
+        Adaptive cap. The fine-tuned checkpoint sometimes fails to emit EOS
+        on out-of-distribution inputs, so generation runs to whatever cap we
+        set. Sizing the cap to the actual text length keeps wall-clock synth
+        time bounded.
+        """
+        words = max(1, len(text.split()))
+        estimated = words * self.frames_per_word + self.frames_buffer
+        return min(estimated, self.max_new_tokens_cap)
 
     def warmup(self) -> None:
         log.info("warming up CUDA kernels")
