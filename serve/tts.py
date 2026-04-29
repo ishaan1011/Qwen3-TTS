@@ -76,22 +76,44 @@ class TTSEngine:
         """
         Generate audio for `text` and return s16le 24 kHz mono PCM bytes.
         Blocking; offload via asyncio.to_thread from async code.
+
+        Logs frames-generated, wall-clock, ms/frame, and RTF (real-time
+        factor) so we can measure the impact of inference optimizations.
         """
         text = text.strip()
         if not text:
             return b""
         max_new_tokens = self._estimate_max_new_tokens(text)
+        t0 = time.time()
         with torch.no_grad():
             wavs, sr = self.model.generate_custom_voice(
                 text=text,
                 speaker=self.speaker,
                 max_new_tokens=max_new_tokens,
+                # Greedy decoding: deterministic and ~10-30% faster than
+                # default sampling. CustomVoice fine-tunes don't lose
+                # meaningfully here -- the speaker bias is in the
+                # parameters, not in the sampling stochasticity.
+                do_sample=False,
+                subtalker_dosample=False,
             )
+        wall_ms = (time.time() - t0) * 1000
         if sr != SAMPLE_RATE:
             raise RuntimeError(f"unexpected sample rate {sr}, expected {SAMPLE_RATE}")
         wav = np.asarray(wavs[0], dtype=np.float32)
         wav = np.clip(wav, -1.0, 1.0)
         pcm = (wav * 32767.0).astype(np.int16, copy=False)
+        audio_seconds = len(wav) / SAMPLE_RATE
+        # We don't have direct access to codec frame count here; estimate
+        # from audio duration at 12 Hz tokenizer rate.
+        frames_estimate = int(round(audio_seconds * 12))
+        ms_per_frame = wall_ms / max(frames_estimate, 1)
+        rtf = wall_ms / (audio_seconds * 1000) if audio_seconds > 0 else float("inf")
+        log.info(
+            "synth: cap=%d ~frames=%d audio=%.2fs wall=%.0fms ms/frame=%.0f RTF=%.2fx | %s",
+            max_new_tokens, frames_estimate, audio_seconds, wall_ms,
+            ms_per_frame, rtf, text[:60],
+        )
         return pcm.tobytes()
 
 
