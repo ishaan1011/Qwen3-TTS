@@ -98,10 +98,14 @@ def train():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     args = parser.parse_args()
 
+    # No log_with= here: we don't call accelerator.log() anywhere in this
+    # script (just accelerator.print()), and newer accelerate versions
+    # require a project_dir alongside log_with="tensorboard" — leaving it
+    # off keeps this robust across the qwen3-tts env's accelerate==1.12.0
+    # and any newer version that might be in scope (e.g. base).
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision="bf16",
-        log_with="tensorboard",
     )
 
     qwen3tts = Qwen3TTSModel.from_pretrained(
