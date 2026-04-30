@@ -165,6 +165,15 @@ python sft_12hz_lora.py \
   --lora_alpha 64
 ```
 
+The optimizer uses two parameter groups: LoRA adapters at `--lr` (default
+1e-4) and full-rank `modules_to_save` (codec_head, lm_head, codec_embedding,
+text_projection) at `--lr × --modules_to_save_lr_ratio` (default 0.1, so
+1e-5). The full-rank LR matches the SFT sweet spot validated in claude.md;
+training those modules at the LoRA LR over-rotates the output heads and
+produces "gibberish + jelly" output — same failure mode full SFT showed at
+lr=2e-5. **Don't pass `--modules_to_save_lr_ratio 1.0`** unless you're
+deliberately ablating this.
+
 Per-epoch outputs:
 
 ```

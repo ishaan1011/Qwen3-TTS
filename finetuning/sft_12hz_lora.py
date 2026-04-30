@@ -87,7 +87,15 @@ def train():
     parser.add_argument("--train_jsonl", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-4,
-                        help="LoRA wants ~10x higher LR than full SFT (full was 1e-5).")
+                        help="Learning rate for LoRA adapter params. LoRA wants ~10x higher LR "
+                             "than full SFT because rank-restricted weights need more signal per step.")
+    parser.add_argument("--modules_to_save_lr_ratio", type=float, default=0.1,
+                        help="Multiplier on --lr for the FULL-RANK modules in modules_to_save "
+                             "(codec_head, lm_head, codec_embedding, ...). Default 0.1 puts those "
+                             "modules at lr=1e-5, matching the full-SFT sweet spot. Setting this to "
+                             "1.0 trains them at the LoRA LR, which destabilizes the output heads "
+                             "and produces 'gibberish + jelly' output (same failure mode claude.md "
+                             "documented for full SFT at lr=2e-5).")
     parser.add_argument("--num_epochs", type=int, default=5)
     parser.add_argument("--speaker_name", type=str, default="speaker_lora")
     parser.add_argument("--lora_rank", type=int, default=32)
@@ -135,8 +143,36 @@ def train():
     if accelerator.is_main_process:
         model.print_trainable_parameters()
 
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
+    # Split trainable params into two groups so LoRA adapters and full-rank
+    # modules_to_save get appropriate LRs. PEFT names trainable params:
+    #   <path>.lora_A.<adapter>.weight  /  <path>.lora_B.<adapter>.weight
+    #   <path>.modules_to_save.<adapter>.<param>
+    # The first group needs the LoRA-typical LR (~1e-4); the second group is
+    # full-rank linear weights that overshoot at that LR (see codec_head /
+    # lm_head drift analysis), so we scale them down by modules_to_save_lr_ratio.
+    lora_params, full_rank_params = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if ".lora_" in name:
+            lora_params.append(p)
+        else:
+            full_rank_params.append(p)
+    trainable_params = lora_params + full_rank_params
+
+    full_rank_lr = args.lr * args.modules_to_save_lr_ratio
+    if accelerator.is_main_process:
+        print(f"[lora] LoRA params:           {sum(p.numel() for p in lora_params):>12,d}  "
+              f"@ lr={args.lr:.1e}")
+        print(f"[lora] modules_to_save params:{sum(p.numel() for p in full_rank_params):>12,d}  "
+              f"@ lr={full_rank_lr:.1e}")
+
+    optimizer = AdamW(
+        [
+            {"params": lora_params, "lr": args.lr, "weight_decay": args.weight_decay},
+            {"params": full_rank_params, "lr": full_rank_lr, "weight_decay": args.weight_decay},
+        ],
+    )
 
     model, optimizer, train_dataloader = accelerator.prepare(
         model, optimizer, train_dataloader,
@@ -235,6 +271,9 @@ def train():
                         "lora_rank": args.lora_rank,
                         "lora_alpha": args.lora_alpha,
                         "lora_dropout": args.lora_dropout,
+                        "lr": args.lr,
+                        "modules_to_save_lr_ratio": args.modules_to_save_lr_ratio,
+                        "modules_to_save_lr": full_rank_lr,
                         "epoch": epoch,
                     },
                     f,
