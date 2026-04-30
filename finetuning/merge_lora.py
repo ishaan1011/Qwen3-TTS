@@ -28,6 +28,17 @@ from qwen_tts.inference.qwen3_tts_model import Qwen3TTSModel
 from safetensors.torch import save_file
 
 
+def _resolve_to_local_dir(model_path: str) -> str:
+    """If model_path is a local directory, return it as-is. Otherwise treat
+    it as an HF Hub repo ID and resolve to the cached snapshot directory
+    (downloading if needed). shutil.copytree needs a real filesystem path.
+    """
+    if Path(model_path).is_dir():
+        return str(model_path)
+    from huggingface_hub import snapshot_download
+    return snapshot_download(repo_id=model_path)
+
+
 def save_custom_voice_checkpoint(
     merged_model,
     output_dir: str,
@@ -42,10 +53,12 @@ def save_custom_voice_checkpoint(
     state_dict, writes the speaker embedding into codec_embedding row 3000,
     and saves model.safetensors.
     """
-    os.makedirs(output_dir, exist_ok=True)
-    shutil.copytree(init_model_path, output_dir, dirs_exist_ok=True)
+    local_init = _resolve_to_local_dir(init_model_path)
 
-    input_config_file = os.path.join(init_model_path, "config.json")
+    os.makedirs(output_dir, exist_ok=True)
+    shutil.copytree(local_init, output_dir, dirs_exist_ok=True)
+
+    input_config_file = os.path.join(local_init, "config.json")
     output_config_file = os.path.join(output_dir, "config.json")
     with open(input_config_file, "r", encoding="utf-8") as f:
         config_dict = json.load(f)
