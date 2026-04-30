@@ -161,7 +161,12 @@ class VLLMTTSEngine:
 
 
 def make_engine_from_env() -> VLLMTTSEngine:
-    model_path = os.environ.get("TTS_CHECKPOINT", "/home/ubuntu/models/ishaan-prod/run6-epoch0")
+    # Default points at the merged LoRA epoch-1 checkpoint (validated as
+    # equivalent quality to the prior full-SFT run6-epoch0 baseline,
+    # auditioned at lora_sweep_v3). The previous SFT checkpoint at
+    # /home/ubuntu/models/ishaan-prod/run6-epoch0 is preserved as a
+    # fallback — set TTS_CHECKPOINT to switch back if needed.
+    model_path = os.environ.get("TTS_CHECKPOINT", "/home/ubuntu/models/ishaan-lora-prod/epoch-1")
     speaker = os.environ.get("TTS_SPEAKER", "ishaan")
     language = os.environ.get("TTS_LANGUAGE", "English")
     return VLLMTTSEngine(model_path, speaker, language=language)
