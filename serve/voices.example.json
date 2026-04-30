@@ -1,0 +1,14 @@
+{
+  "_comment": "Copy to voices.json (gitignored) and set TTS_VOICES_CONFIG to its path. Each entry under 'voices' maps a logical name (used in WebSocket {voice: ...} fields) to a merged CustomVoice checkpoint dir produced by finetuning/merge_lora.py. 'speaker' is the spk_id key registered in that checkpoint's config.json (matches --speaker_name from sft_12hz_lora.py). 'default' is the voice used when a WebSocket message omits the 'voice' field. Static-split mode: each voice loads its own base into VRAM (~3.4 GB bf16). 2 voices fit comfortably on 23 GB A10G.",
+  "default": "ishaan",
+  "voices": {
+    "ishaan": {
+      "checkpoint": "/home/ubuntu/models/ishaan-lora-prod/epoch-1",
+      "speaker": "ishaan"
+    },
+    "arjun": {
+      "checkpoint": "/home/ubuntu/models/arjun-lora-prod/epoch-N",
+      "speaker": "arjun"
+    }
+  }
+}

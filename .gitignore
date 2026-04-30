@@ -23,3 +23,6 @@ wheels/
 venv/
 env/
 ishaan_audio/
+
+# Local voice config — paths are server-specific; ship voices.example.json instead.
+serve/voices.json
