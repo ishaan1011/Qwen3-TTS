@@ -274,10 +274,15 @@ def make_engine_from_env() -> MultiVoiceVLLMTTSEngine:
         default_voice = cfg.get("default") or next(iter(voices))
         return MultiVoiceVLLMTTSEngine(voices, default_voice=default_voice)
 
-    # Single-voice fallback (back-compat).
+    # Single-voice fallback (back-compat). Default points at the v2 LoRA
+    # (ishaan-lora-v2-prod/epoch-1), trained on audio cleaned via
+    # finetuning/clean_recordings.py — modestly better stability and noise
+    # consistency than the v1 LoRA (ishaan-lora-prod/epoch-1), which is
+    # preserved as a fallback. The original full-SFT checkpoint at
+    # /home/ubuntu/models/ishaan-prod/run6-epoch0 is the deeper fallback.
     spec = VoiceSpec(
         checkpoint_path=os.environ.get(
-            "TTS_CHECKPOINT", "/home/ubuntu/models/ishaan-lora-prod/epoch-1",
+            "TTS_CHECKPOINT", "/home/ubuntu/models/ishaan-lora-v2-prod/epoch-1",
         ),
         speaker=os.environ.get("TTS_SPEAKER", "ishaan"),
         language=os.environ.get("TTS_LANGUAGE", "English"),

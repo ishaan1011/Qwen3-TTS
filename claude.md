@@ -72,10 +72,23 @@ The user runs on a single AWS EC2 box with an A10G GPU (23 GB VRAM), Ubuntu, CUD
 8 GB swap is enabled (`/swapfile`) — added because flash-attn build OOM'd the 16 GB box during initial setup.
 
 Production checkpoints:
-- **Active:** `/home/ubuntu/models/ishaan-lora-prod/epoch-1/` (merged LoRA, default `TTS_CHECKPOINT`)
-- **Fallback:** `/home/ubuntu/models/ishaan-prod/run6-epoch0/` (full SFT, prior production)
+- **Active:** `/home/ubuntu/models/ishaan-lora-v2-prod/epoch-1/` (LoRA trained on audio pre-processed via `finetuning/clean_recordings.py`; default `TTS_CHECKPOINT`).
+- **Fallback 1:** `/home/ubuntu/models/ishaan-lora-prod/epoch-1/` (LoRA trained on raw recordings — the original validated LoRA before audio cleanup).
+- **Fallback 2:** `/home/ubuntu/models/ishaan-prod/run6-epoch0/` (full SFT, prior production).
 
-The LoRA training output (per-epoch adapters + speaker_embedding.pt) lives at `/home/ubuntu/models/ishaan-lora/` and isn't needed at inference time.
+The LoRA training outputs (per-epoch adapters + speaker_embedding.pt) live at `/home/ubuntu/models/ishaan-lora/` and `/home/ubuntu/models/ishaan-lora-v2/` and aren't needed at inference time once merged.
+
+### v2 audio-cleanup gain (what worked, what didn't)
+
+`finetuning/clean_recordings.py` ran two-pass EBU R128 LUFS normalization (-20 LUFS, TP -1.5 dBTP, linear=true), 80 Hz HPF, no denoise/dereverb on the 17 source recordings. Source LUFS spread was ~7.5 LUFS (-28.3 to -20.8) with two recordings clipping above 0 dBTP — both fixed by the limit. Re-chunking the cleaned audio + filtering outliers (with permissive thresholds: `--min_duration_s 0.8 --rms_zscore_max 4.0`, dropping nothing) produced 346 chunks / ~17 min training data vs v1's 23 min (HPF removed sub-80 Hz energy that VAD was previously triggering on, so chunk boundaries shifted).
+
+Re-trained with the same v1 hyperparameters (lr=1e-5, ratio=1.0, rank=32, alpha=32, 5 epochs); epoch 1 sounded modestly more consistent than the v1 LoRA on background noise floor and inter-sentence loudness uniformity. The improvement is real but subtle — at this point the recording quality (mic, room) is the ceiling, not preprocessing.
+
+Knobs that didn't help and weren't enabled by default:
+- `--hum 50`/`--hum 60` mains-hum notch — source noise floor at -31 to -41 dBFS already had no audible hum.
+- `--denoise` (mild afftdn) — would have introduced artifacts the model would learn.
+- Stricter `filter_clips` thresholds — dropped legitimate short utterances that the original 23-min dataset specifically included for short-output prosody.
+- Carrying forward v1 manual transcript fixes — the cleaned audio's VAD produced different chunk boundaries (HPF effect), so old (source, start, end) keys wouldn't match. Trained on raw Whisper transcripts instead; loss looks fine.
 
 ## Voice clone fine-tuning data — what worked
 
