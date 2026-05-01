@@ -139,6 +139,59 @@ conda activate qwen3-tts
 pip install "peft>=0.18.0"
 ```
 
+### 0a) (Optional) Clean source recordings before chunking
+
+If your source recordings are inconsistent in loudness, have audible
+mains hum, or sit on top of low-frequency rumble, run them through
+`clean_recordings.py` *before* `chunk_and_transcribe.py`. The pipeline:
+two-pass EBU R128 loudness normalization (-20 LUFS by default), 80 Hz
+high-pass, optional 50/60 Hz hum notches, true-peak ceiling at -1.5 dBTP.
+Aggressive denoise / dereverb is intentionally not included — those
+introduce artifacts the model will learn as part of the voice.
+
+```bash
+python finetuning/clean_recordings.py \
+  --input_dir   /home/ubuntu/voice_data/raw \
+  --output_dir  /home/ubuntu/voice_data/raw_clean \
+  --source_glob "Recording*"
+
+# Then point chunk_and_transcribe at the cleaned dir:
+python finetuning/chunk_and_transcribe.py \
+  --input_dir  /home/ubuntu/voice_data/raw_clean \
+  --output_dir /home/ubuntu/voice_data/ishaan_v2 \
+  --source_glob "Recording*.wav"
+```
+
+Use `--dry_run` to see the per-file LUFS measurements without writing
+anything; the wider the spread, the more this stage helps. Add `--hum 60`
+(US) or `--hum 50` (EU) only if you can audibly hear hum on the source.
+Add `--denoise` only if you have noticeable broadband noise.
+
+### 0b) (Optional) Filter outlier chunks before training
+
+After `chunk_and_transcribe.py` produces `train_raw.jsonl`, run
+`filter_clips.py` to drop chunks that are outliers in duration, loudness,
+or silence ratio. These are the chunks that destabilize the trained
+voice — sub-1s fragments that are partial words, multi-breath chunks
+the model can't learn cleanly, clips noticeably louder/quieter than the
+median.
+
+```bash
+python finetuning/filter_clips.py \
+  --input_jsonl  /home/ubuntu/voice_data/ishaan_v2/train_raw.jsonl \
+  --output_jsonl /home/ubuntu/voice_data/ishaan_v2/train_filtered.jsonl
+
+# Then continue with the existing pipeline using train_filtered.jsonl:
+python finetuning/prepare_data.py \
+  --input_jsonl  /home/ubuntu/voice_data/ishaan_v2/train_filtered.jsonl \
+  --output_jsonl /home/ubuntu/voice_data/ishaan_v2/train_with_codes.jsonl
+```
+
+The script writes `<output>.dropped.csv` with each rejected clip + the
+reason — eyeball it to confirm the filter isn't being too aggressive.
+Defaults: drop <1.2s or >14s, >45% silence, peak below -30 dBFS, or
+RMS-loudness more than 2.5 MAD-stddevs from the dataset median.
+
 ### 1) Train a LoRA on the same dataset
 
 `sft_12hz_lora.py` is a 1:1 mirror of `sft_12hz.py` (same data, same loss,
