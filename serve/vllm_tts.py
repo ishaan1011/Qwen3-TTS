@@ -26,9 +26,6 @@ os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_omni import AsyncOmni
 
-from .voice_eq import EQConfig, VoiceEQ
-from .voice_pitch import PitchConfig, PitchShifter
-
 log = logging.getLogger(__name__)
 
 SAMPLE_RATE = 24000
@@ -65,16 +62,6 @@ class VLLMTTSEngine:
         log.info("AsyncOmni init done in %.1fs", time.time() - t0)
 
         self._prompt_len_cache: dict[str, object] = {}
-
-        # Pitch shift (off unless TTS_PITCH_SEMITONES is set). Applied
-        # BEFORE EQ so EQ shapes the post-shift formants, not the raw
-        # pitched content.
-        self.pitch = PitchShifter(PitchConfig.from_env(SAMPLE_RATE), SAMPLE_RATE)
-
-        # Voice EQ (off unless TTS_EQ_ENABLE=1). Same EQ chain shared across
-        # all requests, but per-request state preserved inside synthesize()
-        # so chunk boundaries don't click.
-        self.eq = VoiceEQ(EQConfig.from_env(SAMPLE_RATE))
 
     def _build_additional_information(self, text: str) -> dict:
         return {
@@ -152,10 +139,6 @@ class VLLMTTSEngine:
         chunk_count = 0
         total_samples = 0
         ttfa_ms = -1.0
-        # Per-request filter state for pitch shift + EQ. Both are None when
-        # disabled (their .process() short-circuits in that case).
-        pitch_state = self.pitch.make_state()
-        eq_state = self.eq.make_state()
         async for stage_output in self.omni.generate(request, request_id=request_id):
             mm = stage_output.request_output.outputs[0].multimodal_output
             if mm is None:
@@ -174,10 +157,6 @@ class VLLMTTSEngine:
                 if chunk_count == 0:
                     ttfa_ms = (time.time() - t0) * 1000
                 wav = chunk.float().cpu().numpy().flatten()
-                if self.pitch.active:
-                    wav, pitch_state = self.pitch.process(wav, pitch_state)
-                if self.eq.active:
-                    wav, eq_state = self.eq.process(wav, eq_state)
                 wav = np.clip(wav, -1.0, 1.0)
                 pcm = (wav * 32767.0).astype(np.int16, copy=False)
                 chunk_count += 1
